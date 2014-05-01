@@ -24,6 +24,7 @@ import Idris.ElabDecls
 import Idris.Primitives
 import Idris.Imports
 import Idris.Error
+import Idris.CmdOptions
 
 import IRTS.System ( getLibFlags, getIdrisLibDir, getIncFlags )
 

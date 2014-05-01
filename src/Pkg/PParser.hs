@@ -6,6 +6,7 @@ import Idris.Core.TT
 import Idris.REPL
 import Idris.AbsSyntaxTree
 import Idris.ParseHelpers
+import Idris.CmdOptions
 
 import Paths_idris
 

@@ -544,6 +544,8 @@ Library
                 , Idris.Transforms
                 , Idris.Unlit
                 , Idris.WhoCalls
+                , Idris.IdrisMain
+                , Idris.CmdOptions
 
                 , IRTS.BCImp
                 , IRTS.Bytecode
