@@ -31,6 +31,7 @@ import Idris.DeepSeq
 import Idris.Output
 import Idris.WhoCalls
 import Idris.CmdOptions
+import Idris.IdrisMain
 
 import Paths_idris
 import Version_idris (gitHash)
@@ -79,7 +80,6 @@ import Data.Maybe
 import Data.List
 import Data.Char
 import Data.Version
-import Data.Word (Word)
 import Data.Either (partitionEithers)
 import Control.DeepSeq
 
@@ -1158,15 +1158,6 @@ replSettings hFile = setComplete replCompletion $ defaultSettings {
                        historyFile = hFile
                      }
 
--- invoke as if from command line
-idris :: [Opt] -> IO (Maybe IState)
-idris opts = do res <- runErrorT $ execStateT (idrisMain opts) idrisInit
-                case res of
-                  Left err -> do putStrLn $ pshow idrisInit err
-                                 return Nothing
-                  Right ist -> return (Just ist)
-
-
 loadInputs :: Handle -> [FilePath] -> Idris ()
 loadInputs h inputs
   = idrisCatch
@@ -1261,192 +1252,6 @@ loadInputs h inputs
                                     if ok then do xs' <- mapWhileOK f xs
                                                   return (x' : xs')
                                           else return [x']
-
-idrisMain :: [Opt] -> Idris ()
-idrisMain opts =
-    do let inputs = opt getFile opts
-       let quiet = Quiet `elem` opts
-       let nobanner = NoBanner `elem` opts
-       let idesl = Ideslave `elem` opts
-       let runrepl = not (NoREPL `elem` opts)
-       let verbose = runrepl || Verbose `elem` opts
-       let output = opt getOutput opts
-       let ibcsubdir = opt getIBCSubDir opts
-       let importdirs = opt getImportDir opts
-       let bcs = opt getBC opts
-       let pkgdirs = opt getPkgDir opts
-       let optimize = case opt getOptLevel opts of
-                        [] -> 2
-                        xs -> last xs
-       trpl <- case opt getTriple opts of
-                 [] -> runIO $ getDefaultTargetTriple
-                 xs -> return (last xs)
-       tcpu <- case opt getCPU opts of
-                 [] -> runIO $ getHostCPUName
-                 xs -> return (last xs)
-       let outty = case opt getOutputTy opts of
-                     [] -> Executable
-                     xs -> last xs
-       let cgn = case opt getCodegen opts of
-                   [] -> ViaC
-                   xs -> last xs
-       script <- case opt getExecScript opts of
-                   []     -> return Nothing
-                   x:y:xs -> do iputStrLn "More than one interpreter expression found."
-                                runIO $ exitWith (ExitFailure 1)
-                   [expr] -> return (Just expr)
-       let immediate = opt getEvalExpr opts
-
-       when (DefaultTotal `elem` opts) $ do i <- getIState
-                                            putIState (i { default_total = True })
-       setColourise $ not quiet && last (True : opt getColour opts)
-       when (not runrepl) $ setWidth InfinitelyWide
-       mapM_ addLangExt (opt getLanguageExt opts)
-       setREPL runrepl
-       setQuiet (quiet || isJust script || not (null immediate))
-       setIdeSlave idesl
-       setVerbose verbose
-       setCmdLine opts
-       setOutputTy outty
-       setCodegen cgn
-       setTargetTriple trpl
-       setTargetCPU tcpu
-       setOptLevel optimize
-       mapM_ makeOption opts
-       -- if we have the --bytecode flag, drop into the bytecode assembler
-       case bcs of
-         [] -> return ()
-         xs -> return () -- runIO $ mapM_ bcAsm xs
-       case ibcsubdir of
-         [] -> setIBCSubDir ""
-         (d:_) -> setIBCSubDir d
-       setImportDirs importdirs
-
-       when (not (NoBasePkgs `elem` opts)) $ do
-           addPkgDir "prelude"
-           addPkgDir "base"
-       mapM_ addPkgDir pkgdirs
-       elabPrims
-       when (not (NoBuiltins `elem` opts)) $ do x <- loadModule stdout "Builtins"
-                                                return ()
-       when (not (NoPrelude `elem` opts)) $ do x <- loadModule stdout "Prelude"
-                                               return ()
-       when (runrepl &&
-             not quiet &&
-             not idesl &&
-             not (isJust script) &&
-             not nobanner &&
-             null immediate) $
-         iputStrLn banner
-
-       orig <- getIState
-       loadInputs stdout inputs
-
-       runIO $ hSetBuffering stdout LineBuffering
-
-       ok <- noErrors
-       when ok $ case output of
-                    -- just do the checks
-                    [] -> performUsageAnalysis >> return ()
-
-                    -- the compiler will run usage analysis itself
-                    (o:_) -> idrisCatch (process stdout "" (Compile cgn o))
-                               (\e -> do ist <- getIState ; iputStrLn $ pshow ist e)
-
-       case immediate of
-         [] -> return ()
-         exprs -> do setWidth InfinitelyWide
-                     mapM_ (\str -> do ist <- getIState
-                                       c <- colourise
-                                       case parseExpr ist str of
-                                         Failure err -> do iputStrLn $ show (fixColour c err)
-                                                           runIO $ exitWith (ExitFailure 1)
-                                         Success e -> process stdout "" (Eval e))
-                           exprs
-                     runIO $ exitWith ExitSuccess
-
-
-       case script of
-         Nothing -> return ()
-         Just expr -> execScript expr
-
-       -- Create Idris data dir + repl history and config dir
-       idrisCatch (do dir <- getIdrisUserDataDir
-                      exists <- runIO $ doesDirectoryExist dir
-                      unless exists $ iLOG ("Creating " ++ dir)
-                      runIO $ createDirectoryIfMissing True (dir </> "repl"))
-         (\e -> return ())
-
-       historyFile <- fmap (</> "repl" </> "history") getIdrisUserDataDir
-
-       when (runrepl && not idesl) $ do
---          clearOrigPats
-         initScript
-         startServer orig inputs
-         runInputT (replSettings (Just historyFile)) $ repl orig inputs
-       when (idesl) $ ideslaveStart orig inputs
-       ok <- noErrors
-       when (not ok) $ runIO (exitWith (ExitFailure 1))
-  where
-    makeOption (OLogging i) = setLogLevel i
-    makeOption TypeCase = setTypeCase True
-    makeOption TypeInType = setTypeInType True
-    makeOption NoCoverage = setCoverage False
-    makeOption ErrContext = setErrContext True
-    makeOption _ = return ()
-
-    addPkgDir :: String -> Idris ()
-    addPkgDir p = do ddir <- runIO $ getDataDir
-                     addImportDir (ddir </> p)
-
-execScript :: String -> Idris ()
-execScript expr = do i <- getIState
-                     c <- colourise
-                     case parseExpr i expr of
-                          Failure err -> do iputStrLn $ show (fixColour c err)
-                                            runIO $ exitWith (ExitFailure 1)
-                          Success term -> do ctxt <- getContext
-                                             (tm, _) <- elabVal toplevel False term
-                                             res <- execute tm
-                                             runIO $ exitWith ExitSuccess
-
--- | Get the platform-specific, user-specific Idris dir
-getIdrisUserDataDir :: Idris FilePath
-getIdrisUserDataDir = runIO $ getAppUserDataDirectory "idris"
-
--- | Locate the platform-specific location for the init script
-getInitScript :: Idris FilePath
-getInitScript = do idrisDir <- getIdrisUserDataDir
-                   return $ idrisDir </> "repl" </> "init"
-
--- | Run the initialisation script
-initScript :: Idris ()
-initScript = do script <- getInitScript
-                idrisCatch (do go <- runIO $ doesFileExist script
-                               when go $ do
-                                 h <- runIO $ openFile script ReadMode
-                                 runInit h
-                                 runIO $ hClose h)
-                           (\e -> iPrintError $ "Error reading init file: " ++ show e)
-    where runInit :: Handle -> Idris ()
-          runInit h = do eof <- lift . lift $ hIsEOF h
-                         ist <- getIState
-                         unless eof $ do
-                           line <- runIO $ hGetLine h
-                           script <- getInitScript
-                           c <- colourise
-                           processLine ist line script c
-                           runInit h
-          processLine i cmd input clr =
-              case parseCmd i input cmd of
-                   Failure err -> runIO $ print (fixColour clr err)
-                   Success Reload -> iPrintError "Init scripts cannot reload the file"
-                   Success (Load f) -> iPrintError "Init scripts cannot load files"
-                   Success (ModImport f) -> iPrintError "Init scripts cannot import modules"
-                   Success Edit -> iPrintError "Init scripts cannot invoke the editor"
-                   Success Proofs -> proofs i
-                   Success Quit -> iPrintError "Init scripts cannot quit Idris"
-                   Success cmd  -> process stdout [] cmd
 
 ver = showVersion version ++ gitHash
 

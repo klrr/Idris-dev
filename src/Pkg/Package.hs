@@ -24,6 +24,7 @@ import Idris.Output (pshow)
 import Idris.AbsSyntax
 import Idris.IdrisDoc
 import Idris.Output
+import Idris.IdrisMain
 
 import IRTS.System
 
